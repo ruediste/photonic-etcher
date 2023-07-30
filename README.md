@@ -6,6 +6,8 @@
 [![Issues][issues-shield]][issues-url]
 [![MIT License][license-shield]][license-url]
 
+[Live Version of this Fork](https://ruediste.github.io/photonic-etcher)
+
 Photonic Etcher is a browser-based tool for converting gerber files into "printable" exposure files for Anycubic Photon SLA 3D printers. This allows you to use your SLA printer to do photo-lithography without the need for transparency sheets or a separate UV light source.
 
 ![An animated GIF showing how Photonic Etcher is used](/demo.gif?raw=true)
