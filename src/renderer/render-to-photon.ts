@@ -1,18 +1,34 @@
 import { XMLParser } from "fast-xml-parser";
-import { ExportOptions, PhotonFile } from "./pcbAPI";
+import { ExportOptions, ExposureCalibrationOptions, PhotonFile } from "./pcbAPI";
 import { StackupLayer } from "./stackup-renderer";
 import { Svg, SVG } from "@svgdotjs/svg.js";
 import { SVGToImage } from "./svg_to_png";
-import { buildPhotonFile } from "./build-photon-file";
 import { CanvasToImage } from "./canvas_to_img";
 import { PrinterModel } from "../ui/export_dialog";
 
 export interface BuildOutputFileArgs {
-    layerData: Uint8ClampedArray;
+    layers: { exposureTime: number, data: Uint8ClampedArray }[];
     previewData: Uint8ClampedArray;
-    exposureTime: number;
     printerSettings: PrinterModel & { printerModel: string; };
+}
 
+export function calculateExposureTimes(options: ExposureCalibrationOptions) {
+    const result: number[] = [];
+    const steps = options.rows * options.columns;
+    for (let step = 0; step < steps; step++) {
+        if (step === 0) {
+            result.push(options.minTimeSeconds);
+        }
+        else {
+            if (options.useExponential) {
+                result.push(options.minTimeSeconds * Math.pow(options.maxTimeSeconds / options.minTimeSeconds, step / (steps - 1)));
+            }
+            else {
+                result.push(options.minTimeSeconds + step * (options.maxTimeSeconds - options.minTimeSeconds) / (steps - 1));
+            }
+        }
+    }
+    return result;
 }
 
 export default async function renderToPhoton(layers: (StackupLayer & { displayOrder: number, inverted: boolean })[], options: ExportOptions,
@@ -45,7 +61,6 @@ export default async function renderToPhoton(layers: (StackupLayer & { displayOr
         const board_width_mm = parseFloat(svgXMLObj.svg['@_width'].replace("mm", ""));
         const board_height_mm = parseFloat(svgXMLObj.svg['@_height'].replace("mm", ""));
         const viewbox = svgXMLObj.svg['@_viewBox'].split(' ').map((str) => parseInt(str));
-        const exposureTime = options.exposureTimes[layer.id];
         let outputFileName = ""
 
         if (!fileNameCounts[layer.filename]) {
@@ -94,11 +109,9 @@ export default async function renderToPhoton(layers: (StackupLayer & { displayOr
         const board_width_px = Math.round(board_width_mm / xyRes);
         const board_height_px = Math.round(board_height_mm / xyRes);
 
-        const layerImg = await SVGToImage({
-            svg: finalSVG,
+        const layerImg = await SVGToImage(finalSVG, 'img', {
             width: board_width_px,
             height: board_height_px,
-            outputFormat: "img"
         });
         //////////////////// END RENDER SVG INTO RASTERIZED PNG /////////////////////////
 
@@ -107,14 +120,12 @@ export default async function renderToPhoton(layers: (StackupLayer & { displayOr
         const previewSVG = SVG(finalSVG);
 
         const previewConverterOptions = {
-            svg: previewSVG.svg(),
-            outputFormat: "img",
             width: options.printerSettings.previewResolution[0],
             height: options.printerSettings.previewResolution[1]
         }
 
         previewSVG.attr('shape-rendering', "geometricPrecision");
-        const previewImg = await SVGToImage(previewConverterOptions);
+        const previewImg = await SVGToImage(previewSVG.svg(), 'img', previewConverterOptions);
 
         let previewCanvas = document.createElement('canvas');
         let previewContext = previewCanvas.getContext("2d")!;
@@ -164,12 +175,36 @@ export default async function renderToPhoton(layers: (StackupLayer & { displayOr
             ctx.translate(-outputResolution[1] / 2, -outputResolution[0] / 2);
         }
 
+        const outputFileLayers: { exposureTime: number, data: Uint8ClampedArray }[] = [];
+
         ctx.drawImage(layerImg, anchorCoords[0], anchorCoords[1])
+
+        if (options.exposureCalibration === undefined) {
+            outputFileLayers.push({ exposureTime: options.exposureTimes[layer.id], data: ctx.getImageData(0, 0, outputResolution[0], outputResolution[1]).data });
+        }
+        else {
+            const times = calculateExposureTimes(options.exposureCalibration);
+            for (let row = 0; row < options.exposureCalibration.rows; row++) {
+                for (let column = 0; column < options.exposureCalibration.columns; column++) {
+                    const step = row * options.exposureCalibration.columns + column;
+                    let outputLayerExposureTime = step === 0 ? times[0] : times[step] - times[step - 1];
+                    outputFileLayers.push({ exposureTime: outputLayerExposureTime, data: ctx.getImageData(0, 0, outputResolution[0], outputResolution[1]).data });
+
+                    const notExposedWidth = board_width_px * (column + 1) / options.exposureCalibration.columns;
+                    const notExposedHeight = board_height_px * (row + 1) / options.exposureCalibration.rows;
+                    ctx.fillStyle = "black";
+                    ctx.rect(anchorCoords[0], anchorCoords[1] + board_height_px - notExposedHeight, notExposedWidth, notExposedHeight);
+                    ctx.fill();
+                }
+            }
+        }
+
+        ctx.drawImage(layerImg, anchorCoords[0], anchorCoords[1]);
+
 
         //////////////////////////////// END DRAW BOARD IN CORRECT LOCATION ON CANVAS ////////////////////////
 
         ///// Generate PWMS file /////
-        const rawLayerIMGData = ctx.getImageData(0, 0, outputResolution[0], outputResolution[1]);
         const rawPreviewData = previewContext.getImageData(
             0,
             0,
@@ -177,9 +212,8 @@ export default async function renderToPhoton(layers: (StackupLayer & { displayOr
             options.printerSettings.previewResolution[1]
         );
         const photonFileBlob = await fileBuilder({
-            layerData: rawLayerIMGData.data,
+            layers: outputFileLayers,
             previewData: rawPreviewData.data,
-            exposureTime,
             printerSettings: options.printerSettings
         });
         ///// END Generate PWMS file /////

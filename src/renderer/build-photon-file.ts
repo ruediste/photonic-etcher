@@ -124,21 +124,25 @@ function writePhotonHeaders(output: DataView, headerAddr: number, previewAddr: n
 }
 
 
-export async function buildPhotonFile({ layerData, exposureTime, previewData, printerSettings }: BuildOutputFileArgs) {
-    const greyScaleImageData = new Uint8Array(layerData.length / 4);
-    console.assert(layerData.length / 4 === printerSettings.resolution[0] * printerSettings.resolution[1]);
-    for (let i = 0; i < layerData.length / 4; ++i) {
-        greyScaleImageData[i] = layerData[i * 4];
-    }
+export async function buildPhotonFile({ layers, previewData, printerSettings }: BuildOutputFileArgs) {
+    const layersWithBlobs = layers.map((layer) => {
+        console.assert(layer.data.length / 4 === printerSettings.resolution[0] * printerSettings.resolution[1]);
+        const greyScaleImageData = new Uint8Array(layer.data.length / 4);
+        for (let i = 0; i < layer.data.length / 4; ++i) {
+            greyScaleImageData[i] = layer.data[i * 4];
+        }
 
-    let layerDataBlob: Uint8Array | null = null;
-    if (printerSettings.encoding === "RLE4") {
-        layerDataBlob = encodeRLE4(greyScaleImageData);
-    } else if (printerSettings.encoding === "RLE") {
-        layerDataBlob = encodeRLE(greyScaleImageData)
-    } else {
-        throw Error("Unknown image encoding: " + printerSettings.encoding);
-    }
+        let layerDataBlob: Uint8Array | null = null;
+        if (printerSettings.encoding === "RLE4") {
+            layerDataBlob = encodeRLE4(greyScaleImageData);
+        } else if (printerSettings.encoding === "RLE") {
+            layerDataBlob = encodeRLE(greyScaleImageData)
+        } else {
+            throw Error("Unknown image encoding: " + printerSettings.encoding);
+        }
+
+        return { blob: layerDataBlob, addr: null as number, ...layer };
+    });
 
     const previewPixels = printerSettings.previewResolution[0] * printerSettings.previewResolution[1];
     const preview_size = previewPixels * 2 + (printerSettings.fileVersion[0] === 1 ? 12 : 28);
@@ -148,9 +152,18 @@ export async function buildPhotonFile({ layerData, exposureTime, previewData, pr
 
     const LAYERDEF_ADDR = PREVIEW_ADDR + preview_size + (printerSettings.fileVersion[0] === 1 ? 16 : 28);
     const extra_and_machine_data_size = printerSettings.fileVersion[0] === 516 ? 228 : 0;
-    const LAYERDATA_ADDR = LAYERDEF_ADDR + 20 + (32 * 1) + extra_and_machine_data_size;
+    const LAYERDATA_ADDR = LAYERDEF_ADDR + 20 + (32 * layers.length) + extra_and_machine_data_size;
 
-    const outputBuffer = new ArrayBuffer(LAYERDATA_ADDR + layerDataBlob.length);
+    // calculate the addresses of the layer data
+    {
+        let addr = LAYERDATA_ADDR;
+        for (const layer of layersWithBlobs) {
+            layer.addr = addr;
+            addr += layer.blob.length;
+        }
+    }
+
+    const outputBuffer = new ArrayBuffer(LAYERDATA_ADDR + layersWithBlobs.reduce((acc, layer) => acc + layer.blob.length, 0));
     const output = new DataView(outputBuffer);
     // ANYCUBIC and HEADER sections
     writePhotonHeaders(
@@ -161,7 +174,7 @@ export async function buildPhotonFile({ layerData, exposureTime, previewData, pr
         LAYERDATA_ADDR,
         printerSettings.fileVersion,
         printerSettings.xyRes,
-        exposureTime,
+        layers[0].exposureTime,
         printerSettings.resolution,
     );
 
@@ -202,41 +215,48 @@ export async function buildPhotonFile({ layerData, exposureTime, previewData, pr
     output.setUint32(LAYERDEF_ADDR, 1163477324, true); //"LAYERDEF"
     output.setUint32(LAYERDEF_ADDR + 4, 1178944594, true); //"LAYERDEF" (cont.)
     output.setUint32(LAYERDEF_ADDR + 8, 0, true); //"LAYERDEF" (cont.)
-    output.setUint32(LAYERDEF_ADDR + 12, 4 + (32 * 1), true); // bytes in LAYERDEF
-    output.setUint32(LAYERDEF_ADDR + 16, 1, true); // number of layers
+    output.setUint32(LAYERDEF_ADDR + 12, 4 + (32 * layers.length), true); // bytes in LAYERDEF
+    output.setUint32(LAYERDEF_ADDR + 16, layers.length, true); // number of layers
 
-    // Set single layer of metadata
-    output.setUint32(LAYERDEF_ADDR + 20, LAYERDATA_ADDR, true); // Layer0 data start
-    output.setUint32(LAYERDEF_ADDR + 20 + 4, layerDataBlob.length, true); // Layer0 data length
-    output.setFloat32(LAYERDEF_ADDR + 20 + 8, 0.0, true) // Layer0 lift height
-    output.setFloat32(LAYERDEF_ADDR + 20 + 12, 4.0, true) // Layer0 lift speed
-    output.setFloat32(LAYERDEF_ADDR + 20 + 16, exposureTime, true) // Layer0 exposure time
-    output.setFloat32(LAYERDEF_ADDR + 20 + 20, 0.050, true) // Layer0 layer height
-    output.setUint32(LAYERDEF_ADDR + 20 + 24, 0, true) // Padding?
-    output.setUint32(LAYERDEF_ADDR + 20 + 28, 0, true) // Padding?
+    {
+        let z = 0;
+        let addr = LAYERDEF_ADDR + 20;
+        for (const layer of layersWithBlobs) {
+            z += 0.05;
+            output.setUint32(addr, layer.addr, true); // Layer0 data start
+            output.setUint32(addr + 4, layer.blob.length, true); // Layer0 data length
+            output.setFloat32(addr + 8, 0.0, true) // Layer0 lift height
+            output.setFloat32(addr + 12, 4.0, true) // Layer0 lift speed
+            output.setFloat32(addr + 16, layer.exposureTime, true) // Layer0 exposure time
+            output.setFloat32(addr + 20, z, true) // Layer0 layer height
+            output.setUint32(addr + 24, 0, true) // Non zero pixel count
+            output.setUint32(addr + 28, 0, true) // Padding?
+            addr += 32;
+        }
+    }
 
 
     if (printerSettings.fileVersion[0] === 516) {
         // EXTRA Layer
-        const EXTRA_ADDR = LAYERDEF_ADDR + 20 + 32;
+        const EXTRA_ADDR = LAYERDEF_ADDR + 20 + 32 * layers.length;
         output.setUint32(EXTRA_ADDR, 1381259333, true); //"EXTRA"
         output.setUint32(EXTRA_ADDR + 4, 65, true); //"EXTRA" (cont.)
-        output.setUint32(EXTRA_ADDR + 8, 0, true); //"LAYERDEF" (cont.)
-        output.setUint32(EXTRA_ADDR + 12, 24, true); // unknown
-        output.setUint32(EXTRA_ADDR + 16, 2, true);  // unknown
+        output.setUint32(EXTRA_ADDR + 8, 0, true); //"EXTRA" (cont.)
+        output.setUint32(EXTRA_ADDR + 12, 24, true); // bytes in extra section (no idea why this is 24)
+        output.setUint32(EXTRA_ADDR + 16, 2, true);  // Bottom lift count
         output.setFloat32(EXTRA_ADDR + 20, 0.0, true) // Bottom lift height 1
         output.setFloat32(EXTRA_ADDR + 24, 4.0, true) // Bottom lift speed 1
         output.setFloat32(EXTRA_ADDR + 28, 4.0, true) // Bottom retract speed 1
         output.setFloat32(EXTRA_ADDR + 32, 0.0, true) // Bottom lift height 2
         output.setFloat32(EXTRA_ADDR + 36, 4.0, true) // Bottom lift speed 2
         output.setFloat32(EXTRA_ADDR + 40, 4.0, true) // Bottom retract speed 2
-        output.setUint32(EXTRA_ADDR + 44, 2, true);  // unknown
+        output.setUint32(EXTRA_ADDR + 44, 2, true);  // Normal lift count
         output.setFloat32(EXTRA_ADDR + 48, 0.0, true) // lift height 1
         output.setFloat32(EXTRA_ADDR + 52, 4.0, true) // lift speed 1
-        output.setFloat32(EXTRA_ADDR + 56, 4.0, true) // retract speed 1
+        output.setFloat32(EXTRA_ADDR + 56, 4.0, true) // retract speed 2
         output.setFloat32(EXTRA_ADDR + 60, 0.0, true) // lift height 2
         output.setFloat32(EXTRA_ADDR + 64, 4.0, true) // lift speed 2
-        output.setFloat32(EXTRA_ADDR + 68, 4.0, true) // retract speed 2
+        output.setFloat32(EXTRA_ADDR + 68, 4.0, true) // retract speed 1
 
         // MACHINE Layer
         const MACHINE_ADDR = EXTRA_ADDR + 72;
@@ -263,8 +283,10 @@ export async function buildPhotonFile({ layerData, exposureTime, previewData, pr
         output.setUint32(MACHINE_ADDR + 136 + 16, 6506241, true); // unknown
     }
 
-    for (let i = 0; i < layerDataBlob.length; ++i) {
-        output.setUint8(LAYERDATA_ADDR + i, layerDataBlob[i]);
+    for (const layer of layersWithBlobs) {
+        for (let i = 0; i < layer.blob.length; ++i) {
+            output.setUint8(layer.addr + i, layer.blob[i]);
+        }
     }
 
     return new Blob([outputBuffer]);

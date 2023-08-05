@@ -2,8 +2,9 @@ import { Alert, Button, Modal, ProgressBar, Table } from "react-bootstrap";
 import { useEffect, useState } from "react";
 import { titleCase } from "title-case";
 import { addDisplayOrderField, downloadFiles, downloadFile, renderPhotonFiles } from "./utils/pcb_api_utils";
-import { ExportOptions, PhotonFile } from "../renderer/pcbAPI";
+import { ExportOptions, ExposureCalibrationOptions, PhotonFile } from "../renderer/pcbAPI";
 import { StackupLayer } from "../renderer/stackup-renderer";
+import { calculateExposureTimes } from "../renderer/render-to-photon";
 
 export interface PrinterModel {
     fileVersion: [number, number],
@@ -13,6 +14,7 @@ export interface PrinterModel {
     previewResolution: [number, number],
     rotate180: boolean,
     encoding: "RLE" | "RLE4",
+    perLayerExposureTime?: boolean,
     fileFormat: "dlp" | "pm3" | "pm3m" | "pmsq" | "pw0" | "pwma" | "pwmb" | "pwmo" | "pwms" | "pwmx" | "pws" | "photon" | "pwx"
 }
 const printerModels: { [key: string]: PrinterModel } = {
@@ -126,7 +128,9 @@ const printerModels: { [key: string]: PrinterModel } = {
         "previewResolution": [224, 168],
         "rotate180": true,
         "encoding": "RLE",
-        "fileFormat": "photon"
+        "fileFormat": "photon",
+        // per layer exposure times seem not to be supported on the Anycubic Photon (Firmware Version 4.2.19)
+        perLayerExposureTime: false
     },
     'AnyCubic Photon X (.pwx)': {
         "fileVersion": [1, 4],
@@ -139,6 +143,133 @@ const printerModels: { [key: string]: PrinterModel } = {
     },
 }
 
+function ExposureCalibrationForm({ options, setOptions, exponentialAvailable }: {
+    options?: ExposureCalibrationOptions,
+    exponentialAvailable: boolean
+    setOptions: (newValue?: ExposureCalibrationOptions) => void,
+}) {
+    let exposureTimes = '';
+    if (options !== undefined) {
+        const times = calculateExposureTimes(options);
+        for (let row = 0; row < options.rows; row++) {
+            exposureTimes += "Row " + (row + 1) + ": ";
+            for (let col = 0; col < options.columns; col++) {
+                const i = row * options.columns + col;
+                const exposureTime = Math.round(times[i] * 10) / 10;
+                exposureTimes += exposureTime + "; ";
+            }
+            exposureTimes += "\n";
+        }
+    }
+    useEffect(() => { if (!exponentialAvailable) setOptions({ ...options, useExponential: exponentialAvailable }) },
+        [exponentialAvailable]); // eslint-disable-line react-hooks/exhaustive-deps
+    return <div>
+        <div className="form-check form-check-inline">
+            <input id="exposure-exposureCalibration" className="form-check-input" type="checkbox" checked={options !== undefined}
+                onChange={(e) => options === undefined ? setOptions({
+                    minTimeSeconds: 10,
+                    maxTimeSeconds: 60,
+                    columns: 5,
+                    rows: 1,
+                    useExponential: exponentialAvailable,
+                }) : setOptions(undefined)} />
+            <label htmlFor="exposure-exposureCalibration" className="form-check-label" >
+                Exposure Calibration
+            </label>
+        </div>
+        {options === undefined ? null : <>
+            <div className={"mb-3"}>
+                <div className={"row"}>
+                    <div className={"col-6"}>
+                        <label className="form-label">
+                            Min Time
+                        </label>
+                    </div>
+                    <div className={"col-6"}>
+                        <label className="form-label">
+                            Max Time
+                        </label>
+                    </div>
+                </div>
+                <div className={"row"}>
+                    <div className={"col-6"}>
+                        <div className="input-group">
+                            <span className="input-group-text">
+                                <i className="icon bi-clock" />
+                            </span>
+                            <input type="number" className={"form-control"}
+                                value={'' + options.minTimeSeconds}
+                                onChange={(e) => setOptions({ ...options, minTimeSeconds: parseInt(e.target.value) })}
+                            />
+                            <span className="input-group-text">s</span>
+                        </div>
+                    </div>
+                    <div className={"col-6"}>
+                        <div className="input-group">
+                            <span className="input-group-text">
+                                <i className="icon bi-clock" />
+                            </span>
+                            <input type="number" className={"form-control"}
+                                value={'' + options.maxTimeSeconds}
+                                onChange={(e) => setOptions({ ...options, maxTimeSeconds: parseInt(e.target.value) })}
+                            />
+                            <span className="input-group-text">s</span>
+                        </div>
+                    </div>
+                </div>
+                {!exponentialAvailable ? null :
+                    <div className="form-check form-check-inline mt-1">
+                        <input id="exposure-useExponential" className="form-check-input" type="checkbox" checked={options.useExponential}
+                            onChange={(e) => setOptions({ ...options, useExponential: !options.useExponential })} />
+                        <label htmlFor="exposure-useExponential" className="form-check-label" >
+                            Use Exponential
+                        </label>
+                    </div>
+                }
+                <div className="row mt-3">
+                    <div className={"col-6"}>
+                        <label className="form-label">
+                            Columns
+                        </label>
+                    </div>
+                    <div className={"col-6"}>
+                        <label className="form-label">
+                            Rows
+                        </label>
+                    </div>
+                </div>
+                <div className="row">
+                    <div className="col-6">
+                        <div className="input-group">
+                            <input type="number" className={"form-control"}
+                                value={'' + options.columns}
+                                onChange={(e) => setOptions({ ...options, columns: parseInt(e.target.value) })}
+                            />
+                        </div>
+                    </div>
+                    <div className="col-6">
+                        <div className="input-group">
+                            <input type="number" className={"form-control"}
+                                value={'' + options.rows}
+                                onChange={(e) => setOptions({ ...options, rows: parseInt(e.target.value) })}
+                            />
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <label className="form-label">
+                        Exposure Times
+                    </label>
+                </div>
+                <div>
+                    <pre>{exposureTimes}</pre>
+                </div>
+            </div>
+
+
+        </>}
+    </div>
+}
 
 function ExportDialog(props: {
     layers: StackupLayer[],
@@ -166,6 +297,8 @@ function ExportDialog(props: {
 
     const [photonFiles, setphotonFiles] = useState<PhotonFile[]>([]);
     const [outputPath, setOutputPath] = useState("");
+
+    const [exposureCalibrationOptions, setExposureCalibrationOptions] = useState<ExposureCalibrationOptions>();
 
     const sortedLayers = addDisplayOrderField(layers.filter((l) => l !== null));
     sortedLayers.sort((layerA, layerB) => {
@@ -470,7 +603,7 @@ function ExportDialog(props: {
                                 </div>
                             </div>
                             <div>
-                                <label htmlFor="exampleFormControlInput1" className="form-label">
+                                <label className="form-label">
                                     Flip Exported Layers
                                 </label>
                                 <div>
@@ -534,6 +667,8 @@ function ExportDialog(props: {
                                     </div>
                                 </div>
                             </div>
+                            <ExposureCalibrationForm options={exposureCalibrationOptions} setOptions={setExposureCalibrationOptions}
+                                exponentialAvailable={printerModels[printerModel].perLayerExposureTime !== false} />
                         </div>
                     </div>
                 }
@@ -570,7 +705,8 @@ function ExportDialog(props: {
                                 exposureTimes,
                                 anchorOffset,
                                 anchorCorner,
-                                flipBools
+                                flipBools,
+                                exposureCalibration: exposureCalibrationOptions,
                             };
 
                             const layersToRender = addDisplayOrderField(layers

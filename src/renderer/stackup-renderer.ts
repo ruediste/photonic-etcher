@@ -47,8 +47,8 @@ export default async function renderStackup(layers: GerberFile[], options: Optio
     let combinedIMGs = {
         "top_svg": stackup.top.svg,
         "bottom_svg": stackup.bottom.svg,
-        "top_png_blob_url": await SVGToImage({ svg: stackup.top.svg, width: 1024 }),
-        "bottom_png_blob_url": await SVGToImage({ svg: stackup.bottom.svg, width: 1024 })
+        "top_png_blob_url": await SVGToImage(stackup.top.svg, 'base64', { width: 1024 }),
+        "bottom_png_blob_url": await SVGToImage(stackup.bottom.svg, 'base64', { width: 1024 })
     };
 
     return { combinedIMGs, individualLayerSVGs };

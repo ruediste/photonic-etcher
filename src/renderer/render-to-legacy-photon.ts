@@ -1,5 +1,4 @@
 import { encodeRLE } from "./build-photon-file";
-import { PrinterModel } from "../ui/export_dialog";
 import { BuildOutputFileArgs } from "./render-to-photon";
 
 class OutputWriter {
@@ -34,26 +33,37 @@ class OutputWriter {
     }
 }
 
-export async function buildLegacyPhotonFile({ layerData, exposureTime, previewData, printerSettings }: BuildOutputFileArgs) {
+export async function buildLegacyPhotonFile({ layers, previewData, printerSettings }: BuildOutputFileArgs) {
 
-    const greyScaleImageData = new Uint8Array(layerData.length / 4);
     const previewPixels = printerSettings.previewResolution[0] * printerSettings.previewResolution[1];
     console.assert(previewData.length / 4 === previewPixels);
-    for (let i = 0; i < layerData.length / 4; ++i) {
-        greyScaleImageData[i] = layerData[i * 4];
-    }
-
-    let layerDataBlob: Uint8Array = encodeRLE(greyScaleImageData, 125);
 
     const preview_size = previewPixels * 2 + 32; // two bytes per pixel plus header, we do not do RLE encoding on the preview image
 
-    const HEADER_ADDR = 0;
     const PREVIEW1_ADDR = 0x70;
     const PREVIEW2_ADDR = PREVIEW1_ADDR + preview_size;
     const LAYERDEF_ADDR = PREVIEW2_ADDR + preview_size;
-    const LAYERDATA_ADDR = LAYERDEF_ADDR + 36;
+    const LAYERDATA_ADDR = LAYERDEF_ADDR + 36 * layers.length;
 
-    const outputBuffer = new ArrayBuffer(LAYERDATA_ADDR + layerDataBlob.length);
+    const layersWithBlobs = layers.map((layer) => {
+        console.assert(layer.data.length / 4 === printerSettings.resolution[0] * printerSettings.resolution[1]);
+        const greyScaleImageData = new Uint8Array(layer.data.length / 4);
+        for (let i = 0; i < layer.data.length / 4; ++i) {
+            greyScaleImageData[i] = layer.data[i * 4];
+        }
+        return { blob: encodeRLE(greyScaleImageData, 125), addr: null as number, ...layer };
+    });
+
+    // calculate the addresses of the layer data
+    {
+        let addr = LAYERDATA_ADDR;
+        for (const layer of layersWithBlobs) {
+            layer.addr = addr;
+            addr += layer.blob.length;
+        }
+    }
+
+    const outputBuffer = new ArrayBuffer(LAYERDATA_ADDR + layersWithBlobs.reduce((acc, layer) => acc + layer.blob.length, 0));
     const output = new OutputWriter(new DataView(outputBuffer));
 
     //HEADER section
@@ -71,8 +81,8 @@ export async function buildLegacyPhotonFile({ layerData, exposureTime, previewDa
 
     // 0x20
     output.writeFloat32(0.1) // LayerHeightMillimeter
-    output.writeFloat32(exposureTime) // Exposure time setting used at slicing, in seconds, for normal (non-bottom) layers, respectively. Actual time used by the machine is in the layer table.
-    output.writeFloat32(exposureTime) // Exposure time setting used at slicing, in seconds, for bottom layers. Actual time used by the machine is in the layer table.
+    output.writeFloat32(layers.length === 1 ? layers[0].exposureTime : layers[1].exposureTime) // Exposure time setting used at slicing, in seconds, for normal (non-bottom) layers, respectively. Actual time used by the machine is in the layer table.
+    output.writeFloat32(layers[0].exposureTime) // Exposure time setting used at slicing, in seconds, for bottom layers. Actual time used by the machine is in the layer table.
     output.writeFloat32(1) // Light off time setting used at slicing, for normal layers, in seconds. Actual time used by the machine is in the layer table. Note that light_off_time_s appears in both the file header and ExtConfig.
 
     // 0x30
@@ -83,9 +93,9 @@ export async function buildLegacyPhotonFile({ layerData, exposureTime, previewDa
 
     // 0x40
     output.writeUint32(LAYERDEF_ADDR) // file offset of a table of LayerHeader records giving parameters for each printed layer.
-    output.writeUint32(1) // LayerCount. Number of records in the layer table. 
+    output.writeUint32(layers.length) // LayerCount. Number of records in the layer table. 
     output.writeUint32(PREVIEW2_ADDR) // PreviewSmallOffsetAddress. File offsets of ImageHeader records describing the smaller preview images.
-    output.writeUint32(exposureTime + 1) // PrintTime. Estimated duration of print, in seconds.
+    output.writeUint32(layers.reduce((acc, layer) => acc + layer.exposureTime, 0) + 1 * layers.length) // PrintTime. Estimated duration of print, in seconds.
 
     // 0x50
     output.writeUint32(1) // Records whether this file was generated assuming normal (0) or mirrored (1) image projection. LCD printers are "mirrored" for this purpose.
@@ -111,23 +121,27 @@ export async function buildLegacyPhotonFile({ layerData, exposureTime, previewDa
     // E6E0
     writePreview(output, PREVIEW2_ADDR, printerSettings.previewResolution, previewData);
 
-    // 12B72
     // LAYER DEFINITION section
-    // if there were multiple layers, this section would be repeated for each layer, followed by all the data
-    output.writeFloat32(0.1); // PositionZ. The build platform Z position for this layer, measured in millimeters.
-    output.writeFloat32(exposureTime); // ExposureTime. The exposure time for this layer, in seconds.
-    output.writeFloat32(1); // LightOffSeconds. How long to keep the light off after exposing this layer, in seconds.
-    output.writeUint32(LAYERDATA_ADDR); // DataAddress. The layer image offset to encoded layer data.
+    let z = 0.1;
+    for (const layer of layersWithBlobs) {
+        output.writeFloat32(z); // PositionZ. The build platform Z position for this layer, measured in millimeters.
+        z += 0.1;
+        output.writeFloat32(layer.exposureTime); // ExposureTime. The exposure time for this layer, in seconds.
+        output.writeFloat32(0.1); // LightOffSeconds. How long to keep the light off after exposing this layer, in seconds.
+        output.writeUint32(layer.addr); // DataAddress. The layer image offset to encoded layer data.
 
-    output.writeUint32(layerDataBlob.length); // DataSize. The layer image length in bytes.
-    output.writeUint32(0); // PageNumber
-    output.writeUint32(36); // TableSize
-    output.writeUint32(0); // Unknown3
+        output.writeUint32(layer.blob.length); // DataSize. The layer image length in bytes.
+        output.writeUint32(0); // PageNumber
+        output.writeUint32(36); // TableSize
+        output.writeUint32(0); // Unknown3
 
-    output.writeUint32(0); // Unknown4
+        output.writeUint32(0); // Unknown4
+    }
 
     // LAYER DATA section
-    output.writeBlob(layerDataBlob);
+    for (const layer of layersWithBlobs) {
+        output.writeBlob(layer.blob);
+    }
 
     return new Blob([outputBuffer]);
 }

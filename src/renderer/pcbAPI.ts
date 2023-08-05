@@ -13,12 +13,20 @@ export interface PhotonFile {
     slicedFile: Blob
 }
 
+export interface ExposureCalibrationOptions {
+    minTimeSeconds: number,
+    maxTimeSeconds: number,
+    rows: number
+    columns: number
+    useExponential: boolean
+}
 export interface ExportOptions {
     printerSettings: PrinterModel & { printerModel: string },
     exposureTimes: number[],
     anchorOffset: [number, number],
     anchorCorner: string,
     flipBools: boolean[]
+    exposureCalibration?: ExposureCalibrationOptions
 }
 export async function renderPhoton(layersToExport: (StackupLayer & { displayOrder: number, inverted: boolean })[], export_options: ExportOptions) {
     if (export_options.printerSettings.fileFormat === "photon") {

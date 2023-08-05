@@ -20,6 +20,7 @@ Photonic Etcher is a browser-based tool for converting gerber files into "printa
 - Invert mask per layer (for photo-positive vs. photo-negative processes)
 - Subtract drill layers from output (to see where to manually drill holes)
 - Configurable anchor corner and jig offsets (allows repeatable etching for multi-layer processes e.g. copper & solder mask)
+- Mask part of the PCB for exposure calibration series
 
 ### Formats Currently Supported
 
